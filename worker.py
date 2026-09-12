@@ -30,6 +30,13 @@ def load_worker_env():
     return env_path
 
 
+def schedule_next_cycle(app):
+    """Keep the public schedule aligned with the external two-hour trigger."""
+    def advance(state):
+        state['scheduler'].update(enabled=True, nextRunAt=backend.later())
+    app.mutate_state(advance)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--once', action='store_true', help='run one meeting and exit')
@@ -43,6 +50,7 @@ def main():
         raise SystemExit('Hermes model access is unavailable: ' + provider.reason)
     app = backend.App(root / 'data' / 'company.sqlite3', provider)
     if args.once:
+        schedule_next_cycle(app)
         app.run_once()
         print('FlyCo Robinhood Hermes cycle completed', flush=True)
         return

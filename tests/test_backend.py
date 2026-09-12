@@ -135,6 +135,14 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(result['meetings'][0]['status'], 'completed')
         self.assertEqual(len(result['proposals']), 1)
 
+    def test_external_once_worker_advances_public_next_cycle(self):
+        import worker
+        self.app.mutate_state(lambda state: state['scheduler'].update(enabled=False, nextRunAt='2000-01-01T00:00:00Z'))
+        worker.schedule_next_cycle(self.app)
+        scheduler = self.app.load()['scheduler']
+        self.assertTrue(scheduler['enabled'])
+        self.assertGreater(scheduler['nextRunAt'], backend.now())
+
     def test_provider_http_contract(self):
         from unittest.mock import patch
         import io, json
