@@ -101,7 +101,7 @@ function boot() {
   if($('#research-button'))$('#research-button').onclick=()=>action('/api/research');if($('#meeting-button'))$('#meeting-button').onclick=()=>action('/api/meeting');if($('#scheduler'))$('#scheduler').onchange=e=>action('/api/scheduler',{enabled:e.target.checked});
   if(innerWidth<=760)setPanel(false);
   renderPanel();refresh();connectRealtime();setInterval(refresh,15000);
-  request('/api/config').then(config=>{const link=$('#x-profile-link'),url=safeURL(config.xProfileUrl);if(link&&url!=='#'&&new URL(url).hostname.toLowerCase()==='x.com'){link.href=url;link.hidden=false;}}).catch(()=>{});
+
   let loading=false;
   async function loadScene(){
     if(loading)return;loading=true;$('#loading').hidden=false;$('#retry-scene').hidden=true;$('#load-progress').value=0;$('#load-message').textContent='Preparing the WebGL renderer…';
