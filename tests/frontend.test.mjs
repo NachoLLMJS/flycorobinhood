@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+
+test('browser tab title is exactly FlyCo',async()=>{const source=await readFile(new URL('../public/index.html',import.meta.url),'utf8');const titles=[...source.matchAll(/<title>(.*?)<\/title>/g)].map(match=>match[1]);assert.deepEqual(titles,['FlyCo']);});
 async function app() { let source=''; try { source=await readFile(new URL('../public/app.js',import.meta.url),'utf8'); } catch {} return import('data:text/javascript;base64,'+Buffer.from(source).toString('base64')); }
 test('state labels describe the local Hermes worker without exposing provider configuration',async()=>{const m=await app();assert.equal(typeof m.stateLabel,'function');assert.equal(m.stateLabel(null),'Connecting');assert.equal(m.stateLabel({provider:{ready:false}}),'Hermes local worker');assert.equal(m.stateLabel({provider:{ready:true},running:true}),'Hermes working');assert.equal(m.stateLabel({provider:{ready:true},running:false}),'Hermes local worker');});
 test('six meeting positions are distinct and office motion stays on the floor',async()=>{const m=await app();assert.equal(typeof m.flyPosition,'function');const points=Array.from({length:6},(_,i)=>m.flyPosition(i,10,true));assert.equal(new Set(points.map(p=>JSON.stringify(p))).size,6);for(let i=0;i<6;i++)for(let t=0;t<100;t+=5){const p=m.flyPosition(i,t,false);assert.equal(p.y,0);assert.ok(Math.hypot(p.x,p.z)<10);assert.ok(Number.isFinite(p.heading));}assert.deepEqual(m.flyPosition(2,0,true),m.flyPosition(2,40,true));assert.notDeepEqual(m.flyPosition(2,0,false),m.flyPosition(2,40,false));});
