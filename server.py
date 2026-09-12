@@ -18,7 +18,7 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
-def make_server(app, public, port=4775, bind_host='127.0.0.1'):
+def make_server(app, public, port=4775, bind_host='127.0.0.1', public_mode=None):
     public = Path(public).resolve()
 
     class Handler(BaseHTTPRequestHandler):
@@ -145,7 +145,7 @@ def make_server(app, public, port=4775, bind_host='127.0.0.1'):
             return self.respond(200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or 'application/octet-stream')
 
     httpd = QuietThreadingHTTPServer((bind_host, port), Handler)
-    httpd.public_mode = bind_host not in ('127.0.0.1', 'localhost')
+    httpd.public_mode = bind_host not in ('127.0.0.1', 'localhost') if public_mode is None else bool(public_mode)
     return httpd
 
 
@@ -166,7 +166,7 @@ def main():
         threading.Thread(target=app.scheduler_loop, args=(stop,), daemon=True).start()
     bind_host = os.environ.get('HOST', '0.0.0.0' if os.environ.get('PORT') else '127.0.0.1')
     port = int(os.environ.get('PORT', '4775'))
-    httpd = make_server(app, root/'public', port=port, bind_host=bind_host)
+    httpd = make_server(app, root/'public', port=port, bind_host=bind_host, public_mode=(role == 'web' or bool(os.environ.get('PORT'))))
     display_host = '127.0.0.1' if bind_host == '127.0.0.1' else bind_host
     print(f'FlyCo Robinhood: http://{display_host}:{port} | Ctrl+C to stop', flush=True)
     try:

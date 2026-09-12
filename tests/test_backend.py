@@ -110,6 +110,18 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(lease['token'], second_token)
         self.app._release_task(second_token)
 
+    def test_stale_task_cannot_persist_after_a_newer_lease_takes_over(self):
+        meeting = dict(id='old', status='running', startedAt=backend.now(), endedAt=None, summary='', messages=[])
+        first_token = self.app._acquire_task('meeting', meeting)
+        self.app.mutate_state(lambda state: state['lease'].update(expiresAt='2000-01-01T00:00:00Z'))
+        second_token = self.app._acquire_task('meeting')
+        meeting.update(status='completed', summary='stale result', endedAt=backend.now())
+        with self.assertRaises(backend.LeaseLost):
+            self.app._persist_meeting(meeting, first_token)
+        saved = next(item for item in self.app.load()['meetings'] if item['id'] == 'old')
+        self.assertEqual(saved['status'], 'interrupted')
+        self.app._release_task(second_token)
+
     def test_run_once_waits_for_the_hermes_meeting_to_finish(self):
         from unittest.mock import patch
         class FakeProvider:
@@ -342,6 +354,15 @@ class HTTPTests(unittest.TestCase):
             self.assertTrue(json.loads(body)['publicReadOnly'])
         finally:
             self.http.public_mode = False
+
+    def test_explicit_public_mode_cannot_be_disabled_by_loopback_binding(self):
+        import server
+        public = Path(self.tmp.name) / 'public'
+        httpd = server.make_server(self.app, public, port=0, bind_host='127.0.0.1', public_mode=True)
+        try:
+            self.assertTrue(httpd.public_mode)
+        finally:
+            httpd.server_close()
 
     def test_events_endpoint_replays_persisted_events(self):
         import json

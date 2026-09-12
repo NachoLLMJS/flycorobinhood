@@ -154,6 +154,10 @@ class Busy(Exception):
     pass
 
 
+class LeaseLost(Exception):
+    pass
+
+
 class DatabaseAdapter:
     """Keep the tiny state store compatible with SQLite and Railway PostgreSQL."""
     def __init__(self, connection, postgres=False):
@@ -267,6 +271,12 @@ class App:
         self.mutate_state(acquire)
         return token
 
+    def _require_lease(self, state, token):
+        lease = state.get('lease') or {}
+        if lease.get('owner') != self.owner_id or lease.get('token') != token:
+            raise LeaseLost('Task lease was replaced; stale results were discarded')
+        lease['expiresAt'] = lease_later()
+
     def _release_task(self, token):
         def release(state):
             lease = state.get('lease') or {}
@@ -294,13 +304,15 @@ class App:
     def research(self):
         token = self._acquire_task('research')
         try:
-            return self._research()
+            return self._research(token)
         finally:
             self._release_task(token)
 
-    def _research(self):
+    def _research(self, token=None):
         result = collect_sources()
         def persist(state):
+            if token:
+                self._require_lease(state, token)
             by_url = {item['url']: item for item in state['findings']}
             by_url.update({item['url']: item for item in result['findings']})
             state['findings'] = list(by_url.values())[-100:]
@@ -323,15 +335,16 @@ class App:
         self.worker.join()
         return self.state()
 
-    def _persist_meeting(self, meeting):
+    def _persist_meeting(self, meeting, token):
         def persist(state):
+            self._require_lease(state, token)
             state['meetings'] = [meeting if item['id'] == meeting['id'] else item for item in state['meetings']]
         self.mutate_state(persist)
         self.emit('meeting.updated', meeting)
 
     def _meeting(self, meeting, token):
         try:
-            result = self._research()
+            result = self._research(token)
             findings = result['findings']
             if not findings:
                 raise Blocked('No verifiable sources were collected; no conversation was generated.')
@@ -344,9 +357,10 @@ class App:
                 if not isinstance(text, str) or not text.strip():
                     raise Blocked('Provider returned no text')
                 meeting['messages'].append(dict(agentId=agent['id'], text=text[:12000], sourceIds=[f['id'] for f in findings if '[' + f['id'] + ']' in text], createdAt=now()))
-                self._persist_meeting(meeting)
+                self._persist_meeting(meeting, token)
             meeting.update(status='completed', summary=meeting['messages'][-1]['text'], endedAt=now())
             def finish(state):
+                self._require_lease(state, token)
                 state['memories'] = {msg['agentId']: msg['text'][-1400:] for msg in meeting['messages']}
                 state['proposals'].insert(0, dict(id=uuid.uuid4().hex, meetingId=meeting['id'], title='Proposal for human review — not a launch', summary=meeting['summary'], status='pending', createdAt=now(), approvedAt=None, execution='planning-only'))
                 state['proposals'] = state['proposals'][:100]
@@ -354,11 +368,17 @@ class App:
             recent_texts = self.mutate_state(finish)
             post = self.x_publisher.post(meeting['summary'], meeting.get('id'), recent_texts)
             meeting['xPost'] = {'posted': post.get('posted', False), 'tweetId': post.get('tweetId'), 'reason': post.get('reason', ''), 'text': post.get('text', '')}
+        except LeaseLost:
+            return
         except Exception as exc:
             meeting.update(status='blocked' if isinstance(exc, Blocked) else 'failed', summary=str(exc) if isinstance(exc, Blocked) else 'Provider or network failure (' + type(exc).__name__ + '). No transaction was executed.', endedAt=now())
         finally:
-            self._persist_meeting(meeting)
-            self._release_task(token)
+            try:
+                self._persist_meeting(meeting, token)
+            except LeaseLost:
+                pass
+            finally:
+                self._release_task(token)
 
     def approve(self, proposal_id):
         def approve_one(state):
