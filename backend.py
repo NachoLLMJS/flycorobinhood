@@ -392,20 +392,26 @@ class App:
         return proposal
 
     def tick(self):
+        claimed_until = later()
         def claim_schedule(state):
             schedule = state['scheduler']
             if not schedule['enabled'] or not schedule['nextRunAt'] or schedule['nextRunAt'] > now():
-                return False
+                return None
             # Claim persistently BEFORE launch. Missed intervals are coalesced, never replayed.
-            schedule['nextRunAt'] = later()
-            return True
-        if not self.mutate_state(claim_schedule):
+            schedule['nextRunAt'] = claimed_until
+            return claimed_until
+        claim = self.mutate_state(claim_schedule)
+        if not claim:
             return
         try:
             self.start_meeting()
         except (Blocked, Busy):
             # Keep retrying shortly when Hermes is still warming up or a task overlaps.
-            self.mutate_state(lambda state: state['scheduler'].update(nextRunAt=retry_later()))
+            def retry_if_unchanged(state):
+                schedule = state['scheduler']
+                if schedule['enabled'] and schedule['nextRunAt'] == claim:
+                    schedule['nextRunAt'] = retry_later()
+            self.mutate_state(retry_if_unchanged)
 
     def scheduler_loop(self, stop):
         while not stop.wait(1):

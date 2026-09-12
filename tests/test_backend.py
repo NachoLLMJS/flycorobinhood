@@ -165,6 +165,19 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(start.call_count, 1)
         self.assertGreater(recovered.state()['scheduler']['nextRunAt'], backend.now())
 
+    def test_failed_tick_does_not_overwrite_a_newer_scheduler_disable(self):
+        from unittest.mock import patch
+        other = backend.App(self.path, backend.Provider({}))
+        self.app.mutate_state(lambda state: state['scheduler'].update(enabled=True, nextRunAt='2000-01-01T00:00:00Z'))
+        def disable_then_block():
+            other.set_scheduler(False)
+            raise backend.Blocked('fixture')
+        with patch.object(self.app, 'start_meeting', side_effect=disable_then_block):
+            self.app.tick()
+        scheduler = self.app.load()['scheduler']
+        self.assertFalse(scheduler['enabled'])
+        self.assertIsNone(scheduler['nextRunAt'])
+
     def test_state_persists_scheduler(self):
         self.app.set_scheduler(True)
         state = backend.App(self.path, provider=backend.Provider({})).state()
