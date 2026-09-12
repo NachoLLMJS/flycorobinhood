@@ -61,6 +61,55 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(len(saved['messages']), 7)
         self.assertEqual(len(self.app.state()['proposals']), 1)
 
+    def test_atomic_state_mutation_does_not_lose_cross_process_updates(self):
+        import threading
+        other = backend.App(self.path, provider=backend.Provider({}))
+        def increment(app):
+            for _ in range(40):
+                def mutate(state):
+                    state['counter'] = state.get('counter', 0) + 1
+                app.mutate_state(mutate)
+        threads = [threading.Thread(target=increment, args=(app,)) for app in (self.app, other)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join(10)
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(self.app.load()['counter'], 80)
+
+    def test_shared_meeting_lease_blocks_a_second_process(self):
+        import threading
+        from unittest.mock import patch
+        entered, release = threading.Event(), threading.Event()
+        class BlockingProvider:
+            def state(self): return dict(ready=True, name='lease fixture', reason='')
+            def complete(self, agent, findings, messages):
+                entered.set()
+                release.wait(3)
+                return 'English meeting contribution [source1]'
+        self.app.provider = BlockingProvider()
+        other = backend.App(self.path, provider=BlockingProvider())
+        evidence = [dict(id='source1', title='fixture', url='https://docs.ponsfamily.com/v2', summary='fixture', agentId='hex', createdAt=backend.now())]
+        with patch.object(backend, 'collect_sources', return_value=dict(findings=evidence, errors=[])):
+            first = self.app.start_meeting()
+            self.assertTrue(entered.wait(2))
+            try:
+                with self.assertRaises(backend.Busy):
+                    other.start_meeting()
+            finally:
+                release.set()
+                self.app.worker.join(5)
+                if hasattr(other, 'worker'):
+                    other.worker.join(5)
+        self.assertEqual(self.app.state()['meetings'][0]['id'], first['id'])
+
+    def test_stale_task_cannot_release_a_newer_lease_from_same_process(self):
+        first_token = self.app._acquire_task('research')
+        self.app.mutate_state(lambda state: state['lease'].update(expiresAt='2000-01-01T00:00:00Z'))
+        second_token = self.app._acquire_task('meeting')
+        self.app._release_task(first_token)
+        lease = self.app.load()['lease']
+        self.assertEqual(lease['token'], second_token)
+        self.app._release_task(second_token)
+
     def test_run_once_waits_for_the_hermes_meeting_to_finish(self):
         from unittest.mock import patch
         class FakeProvider:
@@ -138,6 +187,33 @@ class BackendTests(unittest.TestCase):
             with self.assertRaises(TypeError):
                 backend.App(self.path, provider=backend.Provider({}))
         self.assertTrue(any('ON CONFLICT' in statement for statement in statements))
+
+    def test_postgres_atomic_mutation_locks_state_row_for_update(self):
+        import contextlib
+        import json
+        from unittest.mock import patch
+        statements = []
+        stored = {'findings': [], 'meetings': [], 'proposals': [], 'scheduler': {'enabled': True, 'nextRunAt': backend.later(), 'intervalHours': 2}, 'lease': None, 'counter': 0}
+        class Cursor:
+            def __init__(self, row=None): self.row = row
+            def fetchone(self): return self.row
+        class FakeDB:
+            postgres = True
+            def execute(self, sql, params=()):
+                statements.append(sql)
+                if sql.startswith('SELECT value'):
+                    return Cursor((json.dumps(stored),))
+                if sql.startswith('UPDATE state'):
+                    stored.clear()
+                    stored.update(json.loads(params[0]))
+                return Cursor()
+        @contextlib.contextmanager
+        def fake_db():
+            yield FakeDB()
+        with patch.object(self.app, 'db', fake_db):
+            self.app.mutate_state(lambda state: state.update(counter=state['counter'] + 1))
+        self.assertEqual(stored['counter'], 1)
+        self.assertIn('SELECT value FROM state WHERE id=1 FOR UPDATE', statements)
 
 class HTTPTests(unittest.TestCase):
     def setUp(self):

@@ -14,6 +14,7 @@ import urllib.error
 
 class XPublisher:
     endpoint = 'https://api.x.com/2/tweets'
+    identity_endpoint = 'https://api.x.com/2/users/me'
 
     def __init__(self, env=None):
         env = env or os.environ
@@ -24,9 +25,18 @@ class XPublisher:
         self.bearer_token = env.get(prefix + 'BEARER_TOKEN', '').strip()
         self.access_token = env.get(prefix + 'ACCESS_TOKEN', '').strip()
         self.access_token_secret = env.get(prefix + 'ACCESS_TOKEN_SECRET', '').strip()
+        self.expected_username = env.get(prefix + 'EXPECTED_USERNAME', '').strip().lstrip('@').lower()
+        self.public_profile_url = env.get('FLYCOROBINHOOD_PUBLIC_X_PROFILE_URL', '').strip()
+
+    def _profile_username(self):
+        parsed = urllib.parse.urlsplit(self.public_profile_url)
+        parts = [part for part in parsed.path.split('/') if part]
+        if parsed.scheme != 'https' or parsed.hostname not in {'x.com', 'www.x.com'} or len(parts) != 1:
+            return ''
+        return parts[0].lstrip('@').lower()
 
     def configured(self):
-        return self.enabled and all((self.consumer_key, self.consumer_secret, self.access_token, self.access_token_secret))
+        return not self.reason()
 
     def reason(self):
         if not self.enabled:
@@ -35,6 +45,10 @@ class XPublisher:
             return 'X consumer credentials are missing'
         if not self.access_token or not self.access_token_secret:
             return 'X user access token credentials are missing; a bearer token cannot publish tweets'
+        if not self.expected_username:
+            return 'X expected username is missing'
+        if self._profile_username() != self.expected_username:
+            return 'X public profile does not match the expected username'
         return ''
 
     @staticmethod
@@ -79,13 +93,23 @@ class XPublisher:
         if not self.configured():
             return {'posted': False, 'reason': self.reason()}
         text = self.tweet_text(summary, meeting_id, recent_texts)
-        request = urllib.request.Request(
-            self.endpoint,
-            data=json.dumps({'text': text}).encode('utf-8'),
-            headers={'Authorization': self._authorization('POST', self.endpoint), 'Content-Type': 'application/json'},
-            method='POST',
-        )
         try:
+            identity_request = urllib.request.Request(
+                self.identity_endpoint,
+                headers={'Authorization': self._authorization('GET', self.identity_endpoint)},
+                method='GET',
+            )
+            with urllib.request.urlopen(identity_request, timeout=20) as response:
+                identity = json.loads(response.read(128001).decode('utf-8'))
+            actual_username = str(identity.get('data', {}).get('username', '')).strip().lstrip('@').lower()
+            if actual_username != self.expected_username:
+                return {'posted': False, 'reason': 'X authenticated identity mismatch; no tweet was sent'}
+            request = urllib.request.Request(
+                self.endpoint,
+                data=json.dumps({'text': text}).encode('utf-8'),
+                headers={'Authorization': self._authorization('POST', self.endpoint), 'Content-Type': 'application/json'},
+                method='POST',
+            )
             with urllib.request.urlopen(request, timeout=20) as response:
                 body = json.loads(response.read(128001).decode('utf-8'))
             tweet_id = body.get('data', {}).get('id')

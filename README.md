@@ -16,6 +16,7 @@ Set these Railway variables in the service settings:
 
 - `DATABASE_URL`: attach Railway PostgreSQL and use its generated value
 - `FLYCOROBINHOOD_PUBLIC_X_PROFILE_URL`: the new account URL shown in the UI, for example `https://x.com/your_new_account`
+- `FLYCOROBINHOOD_X_EXPECTED_USERNAME`: the exact new X username; publishing fails closed unless it matches both the public profile URL and X `/2/users/me`
 - Railway web mode does not need LLM or X publishing secrets when Hermes runs the worker externally.
 - `DATABASE_URL` must also be available to the Hermes worker environment.
 
@@ -34,7 +35,7 @@ Do not commit real values. `.env.example` contains only empty placeholders.
 - Railway web mode is a read-only public viewer and does not start a local Hermes scheduler when `PORT` is present. All public POST routes fail closed; the external Hermes worker owns persisted research and meeting writes.
 - The Hermes-owned worker runs `python worker.py --once` for one cycle or `python worker.py` for its persistent two-hour loop. It requires the same `DATABASE_URL` and runs where Hermes authentication is available.
 - On Windows, the worker automatically reads `C:\Users\<user>\Desktop\FlyCoRobinhood-Hermes.env`; this independent file must contain the new Railway public database URL and the new X account credentials. Override it with `FLYCOROBINHOOD_ENV_FILE` when needed.
-- Optional X meeting posts are disabled by default. Enable them only with the new account by setting `FLYCOROBINHOOD_X_POST_MEETINGS=true` and the namespaced OAuth 1.0a variables `FLYCOROBINHOOD_X_CONSUMER_KEY`, `FLYCOROBINHOOD_X_CONSUMER_SECRET`, `FLYCOROBINHOOD_X_ACCESS_TOKEN`, and `FLYCOROBINHOOD_X_ACCESS_TOKEN_SECRET`. `FLYCOROBINHOOD_X_BEARER_TOKEN` is retained for account/API configuration but cannot publish by itself. Generic `X_*` variables from another project are deliberately ignored. Posts are English-only summaries capped at 30 words. A failed post never fails or stops a meeting.
+- Optional X meeting posts are disabled by default. Enable them only with the new account by setting `FLYCOROBINHOOD_X_POST_MEETINGS=true`, `FLYCOROBINHOOD_X_EXPECTED_USERNAME`, the matching `FLYCOROBINHOOD_PUBLIC_X_PROFILE_URL`, and the namespaced OAuth 1.0a variables `FLYCOROBINHOOD_X_CONSUMER_KEY`, `FLYCOROBINHOOD_X_CONSUMER_SECRET`, `FLYCOROBINHOOD_X_ACCESS_TOKEN`, and `FLYCOROBINHOOD_X_ACCESS_TOKEN_SECRET`. Before every post, the worker calls X `/2/users/me` and refuses to publish if the authenticated username differs. `FLYCOROBINHOOD_X_BEARER_TOKEN` is retained for account/API configuration but cannot publish by itself. Generic `X_*` variables from another project are deliberately ignored. Posts are English-only summaries capped at 30 words. A failed post never fails or stops a meeting.
 
 ## Model and research
 

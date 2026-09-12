@@ -84,6 +84,10 @@ def retry_later():
     return (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat().replace('+00:00', 'Z')
 
 
+def lease_later():
+    return (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat().replace('+00:00', 'Z')
+
+
 AGENTS = [dict(id=i, name=n, role=r, color=c, status='idle') for i,n,r,c in [
     ('buzz','Buzz','CEO','#f7c948'), ('radar','Radar','Research','#5dd6c0'),
     ('hex','Hex','Onchain','#a78bfa'), ('moxie','Moxie','Creative','#f48bb0'),
@@ -179,29 +183,29 @@ class App:
         self.x_publisher = XPublisher(os.environ)
         self.database_url = os.environ.get('DATABASE_URL', '').strip()
         self.lock = threading.RLock()
-        self.running = False
+        self.owner_id = uuid.uuid4().hex
         with self.db() as db:
             if self.database_url:
                 db.execute('CREATE TABLE IF NOT EXISTS state (id BIGINT PRIMARY KEY, value TEXT NOT NULL)')
                 db.execute('CREATE TABLE IF NOT EXISTS events (id BIGSERIAL PRIMARY KEY, type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)')
-                db.execute('INSERT INTO state VALUES (1, ?) ON CONFLICT (id) DO NOTHING', (json.dumps(dict(findings=[], meetings=[], proposals=[], scheduler=dict(enabled=True, nextRunAt=soon(), intervalHours=2))),))
+                db.execute('INSERT INTO state VALUES (1, ?) ON CONFLICT (id) DO NOTHING', (json.dumps(dict(findings=[], meetings=[], proposals=[], scheduler=dict(enabled=True, nextRunAt=soon(), intervalHours=2), lease=None)),))
             else:
                 db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY, value TEXT NOT NULL)')
                 db.execute('CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL, payload TEXT NOT NULL, created_at TEXT NOT NULL)')
-                db.execute('INSERT OR IGNORE INTO state VALUES (1, ?)', (json.dumps(dict(findings=[], meetings=[], proposals=[], scheduler=dict(enabled=True, nextRunAt=soon(), intervalHours=2))),))
+                db.execute('INSERT OR IGNORE INTO state VALUES (1, ?)', (json.dumps(dict(findings=[], meetings=[], proposals=[], scheduler=dict(enabled=True, nextRunAt=soon(), intervalHours=2), lease=None)),))
 
-        state = self.load()
-        if migrate_legacy_language(state):
-            self.save(state)
-        # Automation is a product invariant: visitors observe the company working.
-        # Migrate older local databases that were created with a manual scheduler.
-        if not state.get('scheduler', {}).get('enabled'):
-            state['scheduler'].update(enabled=True, nextRunAt=soon())
-            self.save(state)
-        for meeting in state['meetings']:
-            if meeting['status'] == 'running':
-                meeting.update(status='interrupted', endedAt=now(), summary='Process interrupted. It was not resumed automatically to avoid duplicates.')
-        self.save(state)
+        def migrate(state):
+            migrate_legacy_language(state)
+            state.setdefault('lease', None)
+            # Automation is a product invariant: visitors observe the company working.
+            if not state.get('scheduler', {}).get('enabled'):
+                state['scheduler'].update(enabled=True, nextRunAt=soon())
+            if not self._lease_active(state):
+                state['lease'] = None
+                for meeting in state['meetings']:
+                    if meeting['status'] == 'running':
+                        meeting.update(status='interrupted', endedAt=now(), summary='Process interrupted. It was not resumed automatically to avoid duplicates.')
+        self.mutate_state(migrate)
 
     @__import__('contextlib').contextmanager
     def db(self):
@@ -227,9 +231,48 @@ class App:
         with self.db() as db:
             return json.loads(db.execute('SELECT value FROM state WHERE id=1').fetchone()[0])
 
+    @staticmethod
+    def _lease_active(state):
+        lease = state.get('lease')
+        return bool(lease and lease.get('expiresAt', '') > now())
+
+    def mutate_state(self, mutator):
+        """Run one read-modify-write while holding a database-level lock."""
+        with self.lock:
+            with self.db() as db:
+                if not db.postgres:
+                    db.execute('BEGIN IMMEDIATE')
+                suffix = ' FOR UPDATE' if db.postgres else ''
+                state = json.loads(db.execute('SELECT value FROM state WHERE id=1' + suffix).fetchone()[0])
+                result = mutator(state)
+                db.execute('UPDATE state SET value=? WHERE id=1', (json.dumps(state),))
+                return result
+
     def save(self, state):
         with self.db() as db:
             db.execute('UPDATE state SET value=? WHERE id=1', (json.dumps(state),))
+
+    def _acquire_task(self, kind, meeting=None):
+        token = uuid.uuid4().hex
+        def acquire(state):
+            if self._lease_active(state):
+                raise Busy('Another company task is already running')
+            for existing in state['meetings']:
+                if existing.get('status') == 'running':
+                    existing.update(status='interrupted', endedAt=now(), summary='Previous worker lease expired. The meeting was not resumed automatically to avoid duplicates.')
+            state['lease'] = dict(owner=self.owner_id, token=token, kind=kind, acquiredAt=now(), expiresAt=lease_later())
+            if meeting is not None:
+                state['meetings'].insert(0, meeting)
+                state['meetings'] = state['meetings'][:100]
+        self.mutate_state(acquire)
+        return token
+
+    def _release_task(self, token):
+        def release(state):
+            lease = state.get('lease') or {}
+            if lease.get('owner') == self.owner_id and lease.get('token') == token:
+                state['lease'] = None
+        self.mutate_state(release)
 
     def emit(self, event_type, payload):
         with self.db() as db:
@@ -244,46 +287,35 @@ class App:
     def state(self):
         with self.lock:
             state = self.load()
-            agents = [dict(a, memory=state.get('memories',{}).get(a['id'],''), status='in meeting' if self.running else 'idle') for a in AGENTS]
-            return dict(state, agents=agents, provider=self.provider.state(), running=self.running)
+            running = self._lease_active(state)
+            agents = [dict(a, memory=state.get('memories',{}).get(a['id'],''), status='in meeting' if running else 'idle') for a in AGENTS]
+            return dict(state, agents=agents, provider=self.provider.state(), running=running)
 
     def research(self):
-        with self.lock:
-            if self.running:
-                raise Busy('Another company task is already running')
-            self.running = True
+        token = self._acquire_task('research')
         try:
             return self._research()
         finally:
-            with self.lock:
-                self.running = False
+            self._release_task(token)
 
     def _research(self):
         result = collect_sources()
-        with self.lock:
-            state = self.load()
+        def persist(state):
             by_url = {item['url']: item for item in state['findings']}
             by_url.update({item['url']: item for item in result['findings']})
             state['findings'] = list(by_url.values())[-100:]
-            self.save(state)
+        self.mutate_state(persist)
         self.emit('research.updated', dict(findings=result['findings'], errors=result['errors']))
         return result
 
     def start_meeting(self):
-        with self.lock:
-            if self.running:
-                raise Busy('Another company task is already running')
-            if not self.provider.state()['ready']:
-                raise Blocked(self.provider.state()['reason'])
-            meeting = dict(id=uuid.uuid4().hex, status='running', startedAt=now(), endedAt=None, summary='', messages=[])
-            state = self.load()
-            state['meetings'].insert(0, meeting)
-            state['meetings'] = state['meetings'][:100]
-            self.save(state)
-            self.running = True
-            self.worker = threading.Thread(target=self._meeting, args=(meeting,), daemon=True)
-            self.worker.start()
-            return dict(meeting)
+        if not self.provider.state()['ready']:
+            raise Blocked(self.provider.state()['reason'])
+        meeting = dict(id=uuid.uuid4().hex, status='running', startedAt=now(), endedAt=None, summary='', messages=[])
+        token = self._acquire_task('meeting', meeting)
+        self.worker = threading.Thread(target=self._meeting, args=(meeting, token), daemon=True)
+        self.worker.start()
+        return dict(meeting)
 
     def run_once(self):
         """Run one Hermes-owned cycle and wait until every message is persisted."""
@@ -292,13 +324,12 @@ class App:
         return self.state()
 
     def _persist_meeting(self, meeting):
-        with self.lock:
-            state = self.load()
+        def persist(state):
             state['meetings'] = [meeting if item['id'] == meeting['id'] else item for item in state['meetings']]
-            self.save(state)
+        self.mutate_state(persist)
         self.emit('meeting.updated', meeting)
 
-    def _meeting(self, meeting):
+    def _meeting(self, meeting, token):
         try:
             result = self._research()
             findings = result['findings']
@@ -315,51 +346,46 @@ class App:
                 meeting['messages'].append(dict(agentId=agent['id'], text=text[:12000], sourceIds=[f['id'] for f in findings if '[' + f['id'] + ']' in text], createdAt=now()))
                 self._persist_meeting(meeting)
             meeting.update(status='completed', summary=meeting['messages'][-1]['text'], endedAt=now())
-            with self.lock:
-                state = self.load()
+            def finish(state):
                 state['memories'] = {msg['agentId']: msg['text'][-1400:] for msg in meeting['messages']}
                 state['proposals'].insert(0, dict(id=uuid.uuid4().hex, meetingId=meeting['id'], title='Proposal for human review — not a launch', summary=meeting['summary'], status='pending', createdAt=now(), approvedAt=None, execution='planning-only'))
                 state['proposals'] = state['proposals'][:100]
-                recent_texts = [item.get('xPost', {}).get('text', '') for item in state['meetings'] if item.get('xPost', {}).get('text')]
-                self.save(state)
+                return [item.get('xPost', {}).get('text', '') for item in state['meetings'] if item.get('xPost', {}).get('text')]
+            recent_texts = self.mutate_state(finish)
             post = self.x_publisher.post(meeting['summary'], meeting.get('id'), recent_texts)
             meeting['xPost'] = {'posted': post.get('posted', False), 'tweetId': post.get('tweetId'), 'reason': post.get('reason', ''), 'text': post.get('text', '')}
         except Exception as exc:
             meeting.update(status='blocked' if isinstance(exc, Blocked) else 'failed', summary=str(exc) if isinstance(exc, Blocked) else 'Provider or network failure (' + type(exc).__name__ + '). No transaction was executed.', endedAt=now())
         finally:
             self._persist_meeting(meeting)
-            with self.lock:
-                self.running = False
+            self._release_task(token)
 
     def approve(self, proposal_id):
-        with self.lock:
-            state = self.load()
+        def approve_one(state):
             for proposal in state['proposals']:
                 if proposal['id'] == proposal_id:
                     proposal.update(status='approved', execution='planning-only', approvedAt=proposal.get('approvedAt') or now())
-                    self.save(state)
-                    self.emit('proposal.updated', proposal)
-                    return proposal
+                    return dict(proposal)
             raise KeyError(proposal_id)
+        proposal = self.mutate_state(approve_one)
+        self.emit('proposal.updated', proposal)
+        return proposal
 
     def tick(self):
-        with self.lock:
-            state = self.load()
+        def claim_schedule(state):
             schedule = state['scheduler']
             if not schedule['enabled'] or not schedule['nextRunAt'] or schedule['nextRunAt'] > now():
-                return
+                return False
             # Claim persistently BEFORE launch. Missed intervals are coalesced, never replayed.
             schedule['nextRunAt'] = later()
-            self.save(state)
-            if self.running:
-                return
-            try:
-                self.start_meeting()
-            except (Blocked, Busy):
-                # Keep retrying shortly when Hermes is still warming up or a task overlaps.
-                state = self.load()
-                state['scheduler']['nextRunAt'] = retry_later()
-                self.save(state)
+            return True
+        if not self.mutate_state(claim_schedule):
+            return
+        try:
+            self.start_meeting()
+        except (Blocked, Busy):
+            # Keep retrying shortly when Hermes is still warming up or a task overlaps.
+            self.mutate_state(lambda state: state['scheduler'].update(nextRunAt=retry_later()))
 
     def scheduler_loop(self, stop):
         while not stop.wait(1):
@@ -368,9 +394,9 @@ class App:
     def set_scheduler(self, enabled):
         if type(enabled) is not bool:
             raise ValueError('enabled must be boolean')
-        with self.lock:
-            state = self.load()
+        def update(state):
             state['scheduler'].update(enabled=enabled, nextRunAt=(state['scheduler']['nextRunAt'] or later()) if enabled else None)
-            self.save(state)
-            self.emit('scheduler.updated', state['scheduler'])
-            return state['scheduler']
+            return dict(state['scheduler'])
+        scheduler = self.mutate_state(update)
+        self.emit('scheduler.updated', scheduler)
+        return scheduler
