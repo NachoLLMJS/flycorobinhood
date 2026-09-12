@@ -1,0 +1,25 @@
+import {chromium} from 'playwright';
+const baseURL=process.env.QA_BASE_URL||'http://127.0.0.1:4775';
+const b=await chromium.launch({channel:'chrome',headless:true});
+const p=await b.newPage({viewport:{width:1600,height:1000}});
+const errors=[];p.on('pageerror',e=>errors.push(e.message));
+const actual=await (await p.request.get(baseURL+'/api/state')).json();
+const liveFixture=structuredClone(actual);liveFixture.meetings[0].status='running';
+await p.route('**/api/state',r=>r.fulfill({json:liveFixture}));
+await p.goto(baseURL);
+await p.locator('#speech').waitFor({state:'visible',timeout:5000});
+if(!(await p.locator('#speech').textContent()).includes('LIVE MEETING'))throw Error('Live speech missing');
+await p.unroute('**/api/state');
+await p.goto(baseURL);await p.locator('#loading').waitFor({state:'hidden',timeout:95000});
+await p.locator('[data-tab="meetings"]').click();await p.locator('[data-meeting]').first().click();
+await p.locator('#replay').click();await p.locator('#speech').waitFor({state:'visible'});
+if(await p.locator('.message').count()!==7)throw Error('Missing actual meeting transcript');
+await p.screenshot({path:'qa/meeting-real.png'});await p.locator('#stop-replay').click();
+await p.locator('[data-tab="launch"]').click();
+await p.locator('[data-approve]').first().waitFor({state:'visible',timeout:3000});
+// Approval remains untouched: user review is required, never auto-approve real data.
+await p.screenshot({path:'qa/launch-review.png'});
+await p.locator('[data-agent="radar"]').click();
+if(!(await p.locator('#panel-content').textContent()).includes('Persistent memory'))throw Error('Missing memory');
+console.log(JSON.stringify({actualTranscriptMessages:7,approvalControlVisible:true,approvalExecuted:false,memoryVisible:true,errors}));
+await b.close();if(errors.length)process.exitCode=1;

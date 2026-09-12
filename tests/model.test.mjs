@@ -1,0 +1,23 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import * as THREE from 'three';
+const moduleUrl=new URL('../public/fly-model.js',import.meta.url);
+test('scientific model loader creates grounded independent fly instances with moving anatomical limbs',async()=>{
+ const exists=await fs.access(moduleUrl).then(()=>true,()=>false);
+ assert.ok(exists,'Scientific fly loader must exist');
+ const {loadFlyModel}=await import(moduleUrl.href);
+ const fetcher=async path=>{const b=await fs.readFile(new URL('../public'+path,import.meta.url));return {ok:true,json:async()=>JSON.parse(b),arrayBuffer:async()=>b.buffer.slice(b.byteOffset,b.byteOffset+b.byteLength)}};
+ const model=await loadFlyModel({fetcher});
+ const a=model.createFly(),b=model.createFly();
+ const box=new THREE.Box3().setFromObject(a);
+ assert.ok(Math.abs(box.min.y)<0.02,'feet rest on ground');
+ assert.ok(box.max.z-box.min.z>1.3 && box.max.z-box.min.z<1.5,'fly length normalized');
+ assert.equal(a.userData.anatomy.length,69);
+ assert.notEqual(a.userData.anatomy[0],b.userData.anatomy[0]);
+ assert.equal(a.userData.anatomy[0].geometry,b.userData.anatomy[0].geometry,'geometry shared');
+ const leg=a.userData.anatomy.find(m=>m.name==='nmf/lf_tibia');
+ model.animateFly(a,0,true);const before=leg.position.clone();
+ model.animateFly(a,.23,true);assert.ok(before.distanceTo(leg.position)>0.0001,'leg joints animate');
+ assert.ok(model.provenance.includes('NeuroMechFly'));
+});

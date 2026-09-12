@@ -1,0 +1,13 @@
+FlyCo Robinhood scientific visual model
+
+Original model: NeuroMechFly v2 / FlyGym, NeLy-EPFL and contributors.
+https://github.com/NeLy-EPFL/flygym
+https://neuromechfly.org/
+Retrieved from upstream wasm game model bundle.
+See NeuroMechFly-Apache-2.0.txt for the upstream license.
+
+Modifications: original meshes and MuJoCo forward-kinematic poses exported to a compact binary/JSON format; coordinate normalization, orientation and browser playback. Movement is pose replay, not live MuJoCo dynamics or connectome emulation.
+
+Three.js by the Three.js authors: MIT (Three-MIT.txt).
+
+MaleCNS data is not bundled or executed. No claim of affiliation or endorsement by Google, DeepMind, Janelia, EPFL, Robinhood, or Pons.

@@ -1,0 +1,4 @@
+Asset: fly-brain.glb
+Source: https://whatisabrain.com/museum/fly
+Description: Adult fruit fly brain, FlyWire reconstruction
+Downloaded for local rendering in FlyCo Robinhood. The source page identifies this as a FlyWire reconstruction; retain this attribution with the asset.
